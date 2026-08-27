@@ -446,15 +446,33 @@ class ShelveryEngine:
 
         for aws_account_id in RuntimeConfig.get_share_with_accounts(self):
             for br in backup_resources:
-                try:
-                    self.share_backup(br, aws_account_id)
-                except Exception as e:
-                    self.logger.exception(f"Failed to dispatch share of backup {br.name} "
-                                          f"with account {aws_account_id}:{e}")
-                    self.report('ShareBackup', 'ERROR', error=e, backup_name=br.name,
-                                **self.backup_context(br))
+                if self.is_backup_shareable(br):
+                    try:
+                        self.share_backup(br, aws_account_id)
+                    except Exception as e:
+                        self.logger.exception(f"Failed to dispatch share of backup {br.name} "
+                                              f"with account {aws_account_id}:{e}")
+                        self.report('ShareBackup', 'ERROR', error=e, backup_name=br.name,
+                                    **self.backup_context(br))
+                else:
+                    self.logger.info(f"Skipping share of backup {br.name} with account {aws_account_id} "
+                                     f"- backup is not eligible for cross-account sharing")
+
+        self.post_create_backups(backup_resources)
 
         return backup_resources
+
+    def post_create_backups(self, backup_resources):
+        """Hook called after all backups are created, copied, and shared. Override in subclasses."""
+        pass
+
+    def post_pull_backups(self, backup_resources):
+        """Hook called after shared backups are copied into this account. Override in subclasses."""
+        pass
+
+    def archive_pending_backups(self):
+        """Archive backups that are ready for long-term storage. Override in subclasses."""
+        pass
 
     @reported_action
     def clean_backups(self):
@@ -600,6 +618,7 @@ class ShelveryEngine:
                         new_backup = shared_backup.cross_account_copy(new_backup_id)
                         self.tag_backup_resource(new_backup)
                         self.store_backup_data(new_backup)
+                        self.post_pull_backups([new_backup])
                         regional_client.delete_object(Bucket=bucket_name, Key=backup_object['Key'])
                         self.logger.info(f"Removed s3://{bucket_name}/{backup_object['Key']}")
                         regional_client.put_object(
@@ -733,6 +752,12 @@ class ShelveryEngine:
                 'Region': region
             }
             ShelveryInvoker().invoke_shelvery_operation(self, method, arguments)
+
+    def is_backup_shareable(self, backup_resource: BackupResource) -> bool:
+        """Check whether a backup resource is eligible for cross-account sharing.
+        Subclasses can override to exclude backups that cannot be copied cross-account
+        (e.g. EBS snapshots destined for archive tier)."""
+        return True
 
     def share_backup(self, backup_resource: BackupResource, aws_account_id: str):
         """
